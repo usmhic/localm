@@ -1,0 +1,49 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping improve localm. Remove secrets and private prompts from all logs.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Image tag, release, or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - Ollama
+        - LM Studio
+        - llama.cpp
+        - LocalAI
+        - Custom OpenAI-compatible API
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include expected behavior and a minimal reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed API keys, private prompts, and sensitive model output.
+          required: true
+        - label: I searched existing issues for this problem.
+          required: true

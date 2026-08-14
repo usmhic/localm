@@ -1,0 +1,22 @@
+# Local environment and secret material
+.env
+.env.*
+*.env
+*.env.*
+.envrc
+.envrc.*
+.direnv/
+.flaskenv
+.flaskenv.*
+.streamlit/secrets.toml
+!/.env.example
+
+# Local binaries and generated output
+/localm
+*.exe
+*.test
+*.out
+coverage*
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,25 @@
+name: localm
+
+services:
+  bridge:
+    image: ghcr.io/usmhic/localm:${LOCALM_IMAGE_TAG:-prod}
+    pull_policy: always
+    env_file:
+      - .env
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - UPSTREAM_BASE_URL=${UPSTREAM_BASE_URL:-}
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

@@ -41,10 +41,11 @@ docker pull ghcr.io/usmhic/localm:dev
 docker pull ghcr.io/usmhic/localm:prod
 ```
 
-The publish workflow uses the repository secret `GHCR_TOKEN`. Create a classic
-GitHub personal access token with `write:packages` and add it under Settings ->
-Secrets and variables -> Actions. The token owner must have write access to the
-`usmhic/localm` package.
+The publish workflow uses the repository `GITHUB_TOKEN` with `packages: write`.
+If the package already exists with granular access controls, open the package's
+GitHub settings and grant the `usmhic/localm` repository write access under
+Manage Actions access. Alternatively, authenticate with a classic personal
+access token that has `write:packages`.
 
 Immutable commit tags use `dev-<sha>` and `prod-<sha>`. The same CI workflow
 tests and publishes pushes to `dev` and `main`; pull requests never publish.

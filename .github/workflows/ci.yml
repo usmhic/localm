@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           cp .env.example .env
-          docker compose --no-interpolate config --quiet
+          docker compose config --no-interpolate --quiet
           docker build -t localm:ci .
           container_name="localm-ci-${GITHUB_RUN_ID}"
           trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT

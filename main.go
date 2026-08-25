@@ -21,32 +21,9 @@ import (
 	"time"
 )
 
-type Config struct {
-	ListenAddr         string
-	ProviderName       string
-	UpstreamBaseURL    string
-	UpstreamAPIKey     string
-	APIKeys            []string
-	AllowedModels      map[string]struct{}
-	MaxBodyBytes       int64
-	MaxTokens          int
-	DefaultMaxTokens   int
-	UpstreamTimeout    time.Duration
-	ShutdownTimeout    time.Duration
-	RateLimitPerKeyRPM int
-	RateLimitPerIPRPM  int
-	MaxConcurrent      int
-	CORSEnabled        bool
-	CORSAllowedOrigins map[string]struct{}
-	ServerReadTimeout  time.Duration
-	ServerWriteTimeout time.Duration
-	ServerIdleTimeout  time.Duration
-	ReadinessTimeout   time.Duration
-}
-
 type Bridge struct {
 	cfg          Config
-	provider     LLMProvider
+	connections  []*connection
 	keyLimiter   *fixedWindowLimiter
 	ipLimiter    *fixedWindowLimiter
 	semaphore    chan struct{}
@@ -66,18 +43,9 @@ type windowEntry struct {
 	reset time.Time
 }
 
-type chatCompletionRequest struct {
-	Model               string            `json:"model"`
-	Messages            []json.RawMessage `json:"messages"`
-	Stream              bool              `json:"stream"`
-	MaxTokens           *int              `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int              `json:"max_completion_tokens,omitempty"`
-}
-
 type openAIErrorEnvelope struct {
 	Error openAIError `json:"error"`
 }
-
 type openAIError struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
@@ -90,92 +58,81 @@ type statusRecorder struct {
 	status int
 }
 
-func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
+func (s *statusRecorder) WriteHeader(code int) { s.status = code; s.ResponseWriter.WriteHeader(code) }
 func (s *statusRecorder) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-func loadConfig() (Config, error) {
-	providerName := normalizeProviderName(getEnv("LLM_PROVIDER", "ollama"))
-	upstreamBaseURL, err := resolveUpstreamBaseURL(providerName)
+type inferenceSpec struct {
+	operation     string
+	requiredField string
+	tokenFields   []string
+}
+
+func main() {
+	cfg, err := loadConfig()
 	if err != nil {
-		return Config{}, err
+		log.Fatalf("invalid configuration: %v", err)
 	}
-	cfg := Config{
-		ListenAddr:         getEnv("LISTEN_ADDR", ":8080"),
-		ProviderName:       providerName,
-		UpstreamBaseURL:    upstreamBaseURL,
-		UpstreamAPIKey:     getEnv("UPSTREAM_API_KEY", ""),
-		MaxBodyBytes:       getEnvInt64("MAX_BODY_BYTES", 1<<20),
-		MaxTokens:          getEnvInt("MAX_TOKENS", 1024),
-		DefaultMaxTokens:   getEnvInt("DEFAULT_MAX_TOKENS", 512),
-		UpstreamTimeout:    getEnvDuration("UPSTREAM_TIMEOUT", 120*time.Second),
-		ShutdownTimeout:    getEnvDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
-		RateLimitPerKeyRPM: getEnvInt("RATE_LIMIT_PER_KEY_RPM", 60),
-		RateLimitPerIPRPM:  getEnvInt("RATE_LIMIT_PER_IP_RPM", 120),
-		MaxConcurrent:      getEnvInt("MAX_CONCURRENT_LLM", getEnvInt("MAX_CONCURRENT_OLLAMA", 4)),
-		CORSEnabled:        getEnvBool("CORS_ENABLED", false),
-		ServerReadTimeout:  getEnvDuration("SERVER_READ_TIMEOUT", 15*time.Second),
-		ServerWriteTimeout: getEnvDuration("SERVER_WRITE_TIMEOUT", 180*time.Second),
-		ServerIdleTimeout:  getEnvDuration("SERVER_IDLE_TIMEOUT", 60*time.Second),
-		ReadinessTimeout:   getEnvDuration("READINESS_TIMEOUT", 3*time.Second),
+	bridge := newBridge(cfg, nil)
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: bridge.routes(), ReadTimeout: cfg.ServerReadTimeout, WriteTimeout: cfg.ServerWriteTimeout, IdleTimeout: cfg.ServerIdleTimeout}
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("{\"level\":\"info\",\"msg\":\"server_start\",\"addr\":%q,\"connections\":%d}", cfg.ListenAddr, len(cfg.Connections))
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case err := <-errCh:
+		log.Fatalf("server error: %v", err)
+	case sig := <-sigCh:
+		log.Printf("{\"level\":\"info\",\"msg\":\"shutdown_signal\",\"signal\":%q}", sig.String())
+		bridge.shuttingDown.Store(true)
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Fatalf("shutdown error: %v", err)
+		}
+		log.Printf("{\"level\":\"info\",\"msg\":\"shutdown_complete\"}")
 	}
-	cfg.APIKeys = parseCSV(getEnv("API_KEYS", ""))
-	if len(cfg.APIKeys) == 0 {
-		return Config{}, errors.New("API_KEYS must include at least one key")
-	}
-	cfg.AllowedModels = make(map[string]struct{})
-	for _, m := range parseCSV(getEnv("ALLOWED_MODELS", "qwen3:8b")) {
-		cfg.AllowedModels[m] = struct{}{}
-	}
-	if len(cfg.AllowedModels) == 0 {
-		return Config{}, errors.New("ALLOWED_MODELS must include at least one model")
-	}
-	if cfg.MaxTokens <= 0 || cfg.DefaultMaxTokens <= 0 {
-		return Config{}, errors.New("MAX_TOKENS and DEFAULT_MAX_TOKENS must be positive")
-	}
-	if cfg.DefaultMaxTokens > cfg.MaxTokens {
-		cfg.DefaultMaxTokens = cfg.MaxTokens
-	}
-	if cfg.MaxConcurrent <= 0 {
-		return Config{}, errors.New("MAX_CONCURRENT_LLM must be positive")
-	}
-	if cfg.RateLimitPerKeyRPM <= 0 || cfg.RateLimitPerIPRPM <= 0 {
-		return Config{}, errors.New("rate limits must be positive")
-	}
-	cfg.CORSAllowedOrigins = make(map[string]struct{})
-	for _, o := range parseCSV(getEnv("CORS_ALLOWED_ORIGINS", "")) {
-		cfg.CORSAllowedOrigins[o] = struct{}{}
-	}
-	return cfg, nil
 }
 
 func newBridge(cfg Config, client *http.Client) *Bridge {
 	if client == nil {
 		client = &http.Client{}
 	}
-	return &Bridge{
-		cfg:        cfg,
-		provider:   newOpenAICompatibleProvider(cfg.ProviderName, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, client),
-		keyLimiter: newFixedWindowLimiter(cfg.RateLimitPerKeyRPM, time.Minute),
-		ipLimiter:  newFixedWindowLimiter(cfg.RateLimitPerIPRPM, time.Minute),
-		semaphore:  make(chan struct{}, cfg.MaxConcurrent),
+	connectionConfigs := cfg.Connections
+	if len(connectionConfigs) == 0 {
+		connectionConfigs = []ConnectionConfig{{
+			Name: defaultConnectionName, Provider: cfg.ProviderName, BaseURL: cfg.UpstreamBaseURL,
+			APIKey: cfg.UpstreamAPIKey, Trust: "local", Models: cloneStringSet(cfg.AllowedModels),
+			Capabilities: compatibilityCapabilities(cfg.ProviderName),
+		}}
 	}
+	connections := make([]*connection, 0, len(connectionConfigs))
+	for _, connectionConfig := range connectionConfigs {
+		connections = append(connections, &connection{
+			config:     connectionConfig,
+			provider:   newOpenAICompatibleProvider(connectionConfig.Provider, connectionConfig.BaseURL, connectionConfig.APIKey, client),
+			discovered: make(map[string]ProviderModel),
+		})
+	}
+	sort.SliceStable(connections, func(i, j int) bool {
+		if connections[i].config.Priority == connections[j].config.Priority {
+			return connections[i].config.Name < connections[j].config.Name
+		}
+		return connections[i].config.Priority > connections[j].config.Priority
+	})
+	return &Bridge{cfg: cfg, connections: connections, keyLimiter: newFixedWindowLimiter(cfg.RateLimitPerKeyRPM, time.Minute), ipLimiter: newFixedWindowLimiter(cfg.RateLimitPerIPRPM, time.Minute), semaphore: make(chan struct{}, cfg.MaxConcurrent)}
 }
 
 func newFixedWindowLimiter(limit int, window time.Duration) *fixedWindowLimiter {
-	return &fixedWindowLimiter{
-		limit:       limit,
-		window:      window,
-		entries:     make(map[string]windowEntry),
-		nextCleanup: time.Now().Add(window),
-	}
+	return &fixedWindowLimiter{limit: limit, window: window, entries: make(map[string]windowEntry), nextCleanup: time.Now().Add(window)}
 }
 
 func (l *fixedWindowLimiter) Allow(id string, now time.Time) bool {
@@ -202,46 +159,6 @@ func (l *fixedWindowLimiter) Allow(id string, now time.Time) bool {
 	return true
 }
 
-func main() {
-	cfg, err := loadConfig()
-	if err != nil {
-		log.Fatalf("invalid configuration: %v", err)
-	}
-	bridge := newBridge(cfg, nil)
-	server := &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      bridge.routes(),
-		ReadTimeout:  cfg.ServerReadTimeout,
-		WriteTimeout: cfg.ServerWriteTimeout,
-		IdleTimeout:  cfg.ServerIdleTimeout,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		log.Printf("{\"level\":\"info\",\"msg\":\"server_start\",\"addr\":%q}", cfg.ListenAddr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	select {
-	case err := <-errCh:
-		log.Fatalf("server error: %v", err)
-	case sig := <-sigCh:
-		log.Printf("{\"level\":\"info\",\"msg\":\"shutdown_signal\",\"signal\":%q}", sig.String())
-		bridge.shuttingDown.Store(true)
-		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
-			log.Fatalf("shutdown error: %v", err)
-		}
-		log.Printf("{\"level\":\"info\",\"msg\":\"shutdown_complete\"}")
-	}
-}
-
 func (b *Bridge) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", docsRoot)
@@ -251,7 +168,10 @@ func (b *Bridge) routes() http.Handler {
 	mux.HandleFunc("/healthz", b.healthz)
 	mux.HandleFunc("/readyz", b.readyz)
 	mux.HandleFunc("/v1/models", b.models)
-	mux.HandleFunc("/v1/chat/completions", b.chatCompletions)
+	mux.HandleFunc("/v1/capabilities", b.capabilities)
+	mux.HandleFunc("/v1/chat/completions", b.inference(inferenceSpec{operation: CapabilityChatCompletions, requiredField: "messages", tokenFields: []string{"max_tokens", "max_completion_tokens"}}))
+	mux.HandleFunc("/v1/responses", b.inference(inferenceSpec{operation: CapabilityResponses, requiredField: "input", tokenFields: []string{"max_output_tokens"}}))
+	mux.HandleFunc("/v1/embeddings", b.inference(inferenceSpec{operation: CapabilityEmbeddings, requiredField: "input"}))
 	return b.withLogging(b.withCORS(mux))
 }
 
@@ -260,9 +180,7 @@ func (b *Bridge) withLogging(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		ip := clientIP(r)
-		log.Printf("{\"level\":\"info\",\"msg\":\"request\",\"method\":%q,\"path\":%q,\"status\":%d,\"duration_ms\":%d,\"ip\":%q}",
-			r.Method, r.URL.Path, rec.status, time.Since(start).Milliseconds(), ip)
+		log.Printf("{\"level\":\"info\",\"msg\":\"request\",\"method\":%q,\"path\":%q,\"status\":%d,\"duration_ms\":%d}", r.Method, r.URL.Path, rec.status, time.Since(start).Milliseconds())
 	})
 }
 
@@ -306,11 +224,19 @@ func (b *Bridge) readyz(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), b.cfg.ReadinessTimeout)
 	defer cancel()
-	if err := b.provider.Ready(ctx); err != nil {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "upstream unavailable", "server_error", "", "")
+	ready := 0
+	b.refreshConnections(ctx)
+	for _, connection := range b.connections {
+		healthy, _, _ := connection.status()
+		if healthy {
+			ready++
+		}
+	}
+	if ready == 0 {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no upstream connection is available", "server_error", "", "upstream_unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ready", "provider": b.provider.Name()})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (b *Bridge) models(w http.ResponseWriter, r *http.Request) {
@@ -322,7 +248,6 @@ func (b *Bridge) models(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid authentication credentials", "authentication_error", "", "invalid_api_key")
 		return
 	}
-
 	models := make([]string, 0, len(b.cfg.AllowedModels))
 	for model := range b.cfg.AllowedModels {
 		models = append(models, model)
@@ -330,118 +255,284 @@ func (b *Bridge) models(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(models)
 	data := make([]map[string]any, 0, len(models))
 	for _, model := range models {
-		data = append(data, map[string]any{
-			"id":       model,
-			"object":   "model",
-			"created":  0,
-			"owned_by": b.provider.Name(),
-		})
+		ownedBy := "localm"
+		if connection := b.firstConnectionForModel(model); connection != nil {
+			ownedBy = connection.config.Name
+		}
+		data = append(data, map[string]any{"id": model, "object": "model", "created": 0, "owned_by": ownedBy})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
 
-func (b *Bridge) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+func (b *Bridge) capabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "", "")
 		return
 	}
-	if b.shuttingDown.Load() {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "service shutting down", "server_error", "", "")
-		return
-	}
-
-	apiKey, ok := b.authorizedAPIKey(r)
-	if !ok {
+	if _, ok := b.authorizedAPIKey(r); !ok {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid authentication credentials", "authentication_error", "", "invalid_api_key")
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), b.cfg.ReadinessTimeout)
+	defer cancel()
+	data := make([]map[string]any, 0, len(b.connections))
+	b.refreshConnections(ctx)
+	for _, connection := range b.connections {
+		healthy, checkedAt, discovered := connection.status()
+		modelIDs := make([]string, 0, len(connection.config.Models))
+		for model := range connection.config.Models {
+			modelIDs = append(modelIDs, model)
+		}
+		sort.Strings(modelIDs)
+		models := make([]map[string]any, 0, len(modelIDs))
+		for _, model := range modelIDs {
+			_, available := discovered[model]
+			models = append(models, map[string]any{"id": model, "available": healthy && available, "capabilities": connection.capabilitiesForModel(model).Sorted()})
+		}
+		item := map[string]any{"name": connection.config.Name, "provider": connection.config.Provider, "priority": connection.config.Priority, "trust": connection.config.Trust, "healthy": healthy, "models": models}
+		if !checkedAt.IsZero() {
+			item["checked_at"] = checkedAt.UTC().Format(time.RFC3339)
+		}
+		data = append(data, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
 
-	now := time.Now()
-	if !b.keyLimiter.Allow(apiKey, now) {
-		writeOpenAIError(w, http.StatusTooManyRequests, "rate limit exceeded for api key", "rate_limit_error", "", "rate_limit_exceeded")
-		return
-	}
-	ip := clientIP(r)
-	if !b.ipLimiter.Allow(ip, now) {
-		writeOpenAIError(w, http.StatusTooManyRequests, "rate limit exceeded for ip", "rate_limit_error", "", "rate_limit_exceeded")
-		return
-	}
+func (b *Bridge) inference(spec inferenceSpec) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeOpenAIError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "", "")
+			return
+		}
+		if b.shuttingDown.Load() {
+			writeOpenAIError(w, http.StatusServiceUnavailable, "service shutting down", "server_error", "", "")
+			return
+		}
+		apiKey, ok := b.authorizedAPIKey(r)
+		if !ok {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid authentication credentials", "authentication_error", "", "invalid_api_key")
+			return
+		}
+		now := time.Now()
+		if !b.keyLimiter.Allow(apiKey, now) {
+			writeOpenAIError(w, http.StatusTooManyRequests, "rate limit exceeded for api key", "rate_limit_error", "", "rate_limit_exceeded")
+			return
+		}
+		if !b.ipLimiter.Allow(clientIP(r), now) {
+			writeOpenAIError(w, http.StatusTooManyRequests, "rate limit exceeded for ip", "rate_limit_error", "", "rate_limit_exceeded")
+			return
+		}
+		select {
+		case b.semaphore <- struct{}{}:
+			defer func() { <-b.semaphore }()
+		default:
+			writeOpenAIError(w, http.StatusTooManyRequests, "too many concurrent requests", "rate_limit_error", "", "concurrency_limit_exceeded")
+			return
+		}
 
-	select {
-	case b.semaphore <- struct{}{}:
-		defer func() { <-b.semaphore }()
-	default:
-		writeOpenAIError(w, http.StatusTooManyRequests, "too many concurrent requests", "rate_limit_error", "", "concurrency_limit_exceeded")
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, b.cfg.MaxBodyBytes)
-	defer r.Body.Close()
-
-	payload, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid request body", "invalid_request_error", "", "")
-		return
-	}
-	var req chatCompletionRequest
-	if err := json.Unmarshal(payload, &req); err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "", "")
-		return
-	}
-	if req.Model == "" {
-		writeOpenAIError(w, http.StatusBadRequest, "model is required", "invalid_request_error", "model", "")
-		return
-	}
-	if _, ok := b.cfg.AllowedModels[req.Model]; !ok {
-		writeOpenAIError(w, http.StatusBadRequest, "model is not allowed", "invalid_request_error", "model", "model_not_allowed")
-		return
-	}
-	if len(req.Messages) == 0 {
-		writeOpenAIError(w, http.StatusBadRequest, "messages are required", "invalid_request_error", "messages", "")
-		return
-	}
-
-	if req.MaxTokens != nil && (*req.MaxTokens <= 0 || *req.MaxTokens > b.cfg.MaxTokens) {
-		writeOpenAIError(w, http.StatusBadRequest, fmt.Sprintf("max_tokens must be between 1 and %d", b.cfg.MaxTokens), "invalid_request_error", "max_tokens", "")
-		return
-	}
-	if req.MaxCompletionTokens != nil && (*req.MaxCompletionTokens <= 0 || *req.MaxCompletionTokens > b.cfg.MaxTokens) {
-		writeOpenAIError(w, http.StatusBadRequest, fmt.Sprintf("max_completion_tokens must be between 1 and %d", b.cfg.MaxTokens), "invalid_request_error", "max_completion_tokens", "")
-		return
-	}
-
-	if req.MaxTokens == nil && req.MaxCompletionTokens == nil {
+		r.Body = http.MaxBytesReader(w, r.Body, b.cfg.MaxBodyBytes)
+		defer r.Body.Close()
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid request body", "invalid_request_error", "", "")
+			return
+		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(payload, &fields); err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "", "")
 			return
 		}
-		fields["max_tokens"] = json.RawMessage(strconv.Itoa(b.cfg.DefaultMaxTokens))
+		model, ok := requiredStringField(fields, "model")
+		if !ok {
+			writeOpenAIError(w, http.StatusBadRequest, "model is required", "invalid_request_error", "model", "")
+			return
+		}
+		if _, allowed := b.cfg.AllowedModels[model]; !allowed {
+			writeOpenAIError(w, http.StatusBadRequest, "model is not allowed", "invalid_request_error", "model", "model_not_allowed")
+			return
+		}
+		if !presentJSONField(fields, spec.requiredField) {
+			writeOpenAIError(w, http.StatusBadRequest, spec.requiredField+" is required", "invalid_request_error", spec.requiredField, "")
+			return
+		}
+		if err := b.validateAndDefaultTokens(fields, spec.tokenFields); err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", tokenErrorParam(err), "")
+			return
+		}
 		payload, err = json.Marshal(fields)
 		if err != nil {
 			writeOpenAIError(w, http.StatusInternalServerError, "failed to prepare upstream request", "server_error", "", "")
 			return
 		}
+		required, stream := requiredCapabilities(spec.operation, fields)
+		selected, missing := b.selectConnection(model, required)
+		if selected == nil {
+			if missing != "" {
+				writeOpenAIError(w, http.StatusBadRequest, "requested feature is not supported for this model", "invalid_request_error", missing, "unsupported_feature")
+			} else {
+				writeOpenAIError(w, http.StatusServiceUnavailable, "no connection serves this model", "server_error", "model", "model_unavailable")
+			}
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), b.cfg.UpstreamTimeout)
+		defer cancel()
+		upstreamResp, err := selected.provider.Forward(ctx, spec.operation, payload)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadGateway, "upstream request failed", "server_error", "", "upstream_error")
+			return
+		}
+		defer upstreamResp.Body.Close()
+		if err := relayProviderResponse(w, upstreamResp, stream); err != nil {
+			log.Printf("{\"level\":\"error\",\"msg\":\"upstream_response_error\",\"connection\":%q,\"provider\":%q,\"error\":\"relay_failed\"}", selected.config.Name, selected.provider.Name())
+		}
 	}
+}
 
-	ctx, cancel := context.WithTimeout(r.Context(), b.cfg.UpstreamTimeout)
-	defer cancel()
+type tokenValidationError struct{ param, message string }
 
-	upstreamResp, err := b.provider.Chat(ctx, payload)
-	if err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, "upstream request failed", "server_error", "", "")
-		return
+func (e *tokenValidationError) Error() string { return e.message }
+func tokenErrorParam(err error) string {
+	var tokenErr *tokenValidationError
+	if errors.As(err, &tokenErr) {
+		return tokenErr.param
 	}
-	defer upstreamResp.Body.Close()
-	if err := relayProviderResponse(w, upstreamResp, req.Stream); err != nil {
-		log.Printf("{\"level\":\"error\",\"msg\":\"upstream_response_error\",\"provider\":%q,\"error\":%q}", b.provider.Name(), err.Error())
+	return ""
+}
+
+func (b *Bridge) validateAndDefaultTokens(fields map[string]json.RawMessage, names []string) error {
+	found := false
+	for _, name := range names {
+		raw, ok := fields[name]
+		if !ok || !presentJSONField(fields, name) {
+			continue
+		}
+		found = true
+		var value int
+		if err := json.Unmarshal(raw, &value); err != nil || value <= 0 || value > b.cfg.MaxTokens {
+			return &tokenValidationError{param: name, message: fmt.Sprintf("%s must be between 1 and %d", name, b.cfg.MaxTokens)}
+		}
 	}
+	if !found && len(names) > 0 {
+		fields[names[0]] = json.RawMessage(strconv.Itoa(b.cfg.DefaultMaxTokens))
+	}
+	return nil
+}
+
+func (b *Bridge) refreshConnections(ctx context.Context) {
+	var group sync.WaitGroup
+	group.Add(len(b.connections))
+	for _, item := range b.connections {
+		connection := item
+		go func() {
+			defer group.Done()
+			connection.refresh(ctx, b.cfg.DiscoveryTTL)
+		}()
+	}
+	group.Wait()
+}
+
+func requiredCapabilities(operation string, fields map[string]json.RawMessage) (CapabilitySet, bool) {
+	required := CapabilitySet{operation: true}
+	stream := boolField(fields, "stream")
+	if stream {
+		required[CapabilityStreaming] = true
+	}
+	if presentJSONField(fields, "tools") || presentJSONField(fields, "tool_choice") || containsJSONKey(fields, "function_call_output") {
+		required[CapabilityTools] = true
+	}
+	if presentJSONField(fields, "response_format") || nestedFieldPresent(fields, "text", "format") {
+		required[CapabilityStructured] = true
+	}
+	if presentJSONField(fields, "reasoning") || presentJSONField(fields, "reasoning_effort") {
+		required[CapabilityReasoning] = true
+	}
+	if containsJSONKey(fields, "image_url") || containsJSONKey(fields, "input_image") {
+		required[CapabilityVision] = true
+	}
+	return required, stream
+}
+
+func (b *Bridge) selectConnection(model string, required CapabilitySet) (*connection, string) {
+	served := false
+	missingSet := make(map[string]struct{})
+	for _, connection := range b.connections {
+		if !connection.allowsModel(model) || !connection.routingEligible(model) {
+			continue
+		}
+		served = true
+		capabilities := connection.capabilitiesForModel(model)
+		if capabilities.ContainsAll(required) {
+			return connection, ""
+		}
+		for capability := range required {
+			if !capabilities[capability] {
+				missingSet[capability] = struct{}{}
+			}
+		}
+	}
+	if !served {
+		return nil, ""
+	}
+	missing := make([]string, 0, len(missingSet))
+	for capability := range missingSet {
+		missing = append(missing, capability)
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		return nil, missing[0]
+	}
+	return nil, ""
+}
+
+func (b *Bridge) firstConnectionForModel(model string) *connection {
+	for _, connection := range b.connections {
+		if connection.allowsModel(model) {
+			return connection
+		}
+	}
+	return nil
+}
+
+func requiredStringField(fields map[string]json.RawMessage, name string) (string, bool) {
+	raw, ok := fields[name]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil || strings.TrimSpace(value) == "" {
+		return "", false
+	}
+	return value, true
+}
+
+func presentJSONField(fields map[string]json.RawMessage, name string) bool {
+	raw, ok := fields[name]
+	return ok && len(raw) > 0 && string(raw) != "null" && string(raw) != "[]" && string(raw) != "{}"
+}
+
+func boolField(fields map[string]json.RawMessage, name string) bool {
+	var value bool
+	_ = json.Unmarshal(fields[name], &value)
+	return value
+}
+
+func nestedFieldPresent(fields map[string]json.RawMessage, parent, child string) bool {
+	var nested map[string]json.RawMessage
+	return json.Unmarshal(fields[parent], &nested) == nil && presentJSONField(nested, child)
+}
+
+func containsJSONKey(fields map[string]json.RawMessage, value string) bool {
+	for _, raw := range fields {
+		if strings.Contains(string(raw), `"`+value+`"`) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, message, typ, param, code string) {
 	writeJSON(w, status, openAIErrorEnvelope{Error: openAIError{Message: message, Type: typ, Param: param, Code: code}})
 }
-
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -491,82 +582,7 @@ func constantTimeStringEqual(a, b string) int {
 		}
 		diff |= ab ^ bb
 	}
-	sameLen := subtle.ConstantTimeEq(int32(len(a)), int32(len(b)))
-	sameContent := subtle.ConstantTimeByteEq(diff, 0)
-	return sameLen & sameContent
-}
-
-func parseCSV(s string) []string {
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	seen := make(map[string]struct{})
-	for _, p := range parts {
-		v := strings.TrimSpace(p)
-		if v == "" {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out
-}
-
-func getEnv(name, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func getEnvInt(name string, fallback int) int {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return fallback
-	}
-	return n
-}
-
-func getEnvInt64(name string, fallback int64) int64 {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return fallback
-	}
-	return n
-}
-
-func getEnvBool(name string, fallback bool) bool {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return fallback
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return fallback
-	}
-	return b
-}
-
-func getEnvDuration(name string, fallback time.Duration) time.Duration {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return fallback
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return fallback
-	}
-	return d
+	return subtle.ConstantTimeEq(int32(len(a)), int32(len(b))) & subtle.ConstantTimeByteEq(diff, 0)
 }
 
 func clientIP(r *http.Request) string {

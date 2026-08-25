@@ -1,0 +1,14 @@
+# Named connections are optional. Without LOCALM_CONFIG, localm keeps using the
+# existing LLM_PROVIDER, UPSTREAM_BASE_URL, and UPSTREAM_API_KEY variables.
+connections:
+  local:
+    provider: ollama
+    base_url: http://host.docker.internal:11434/v1
+    priority: 100
+    trust: local
+    models:
+      - qwen3:8b
+
+# Remote routing needs both this switch and trust: remote on each connection.
+# Keep disabled unless off-network inference is intentional.
+allow_remote: false

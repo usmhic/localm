@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,21 @@ func TestProviderAliases(t *testing.T) {
 		if actual := normalizeProviderName(input); actual != expected {
 			t.Errorf("normalizeProviderName(%q) = %q, want %q", input, actual, expected)
 		}
+	}
+}
+
+func TestCapabilityMetadataAcceptsListsAndFlags(t *testing.T) {
+	capabilities := capabilityMetadata(
+		json.RawMessage(`["streaming","function_calling"]`),
+		json.RawMessage(`{"vision":true,"reasoning":false}`),
+	)
+	for _, capability := range []string{CapabilityStreaming, CapabilityTools, CapabilityVision} {
+		if !capabilities[capability] {
+			t.Errorf("expected %s capability", capability)
+		}
+	}
+	if capabilities[CapabilityReasoning] {
+		t.Fatal("false capability flag was treated as supported")
 	}
 }
 
@@ -55,7 +71,7 @@ func TestProviderForwardsUpstreamKey(t *testing.T) {
 	defer upstream.Close()
 
 	provider := newOpenAICompatibleProvider("custom", upstream.URL, "upstream-secret", upstream.Client())
-	resp, err := provider.Chat(context.Background(), []byte(`{"model":"test","messages":[]}`))
+	resp, err := provider.Forward(context.Background(), CapabilityChatCompletions, []byte(`{"model":"test","messages":[]}`))
 	if err != nil {
 		t.Fatalf("provider chat: %v", err)
 	}

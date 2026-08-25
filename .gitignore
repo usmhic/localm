@@ -10,6 +10,26 @@
 .flaskenv.*
 .streamlit/secrets.toml
 !/.env.example
+/localm.yaml
+/localm.*.yaml
+!/localm.example.yaml
+
+# Credentials, key material, and local data
+.secrets/
+secrets/
+credentials.json
+service-account*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+*.sqlite
+*.sqlite3
+*.db
 
 # Local binaries and generated output
 /localm
@@ -17,6 +37,13 @@
 *.test
 *.out
 coverage*
+*.prof
+*.trace
+*.dump
+/bin/
+/dist/
+/tmp/
+.cache/
 .idea/
 .vscode/
 .DS_Store

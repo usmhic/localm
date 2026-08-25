@@ -23,6 +23,7 @@ body:
         - LM Studio
         - llama.cpp
         - LocalAI
+        - vLLM
         - Custom OpenAI-compatible API
     validations:
       required: true
@@ -43,7 +44,7 @@ body:
     attributes:
       label: Checks
       options:
-        - label: I removed API keys, private prompts, and sensitive model output.
+        - label: I removed API keys, headers, internal URLs, private prompts, and sensitive model output.
           required: true
         - label: I searched existing issues for this problem.
           required: true

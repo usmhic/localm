@@ -1,8 +1,9 @@
 # Provider setup
 
 `localm` talks to inference servers through their OpenAI-compatible `/v1`
-interface. One `localm` instance targets one upstream server, while that server
-may expose any number of models allowed by `ALLOWED_MODELS`.
+interface. One instance can use one legacy environment-configured server or
+several named connections. The global `ALLOWED_MODELS` always remains the
+outer exposure boundary.
 
 ## Docker networking
 
@@ -83,7 +84,8 @@ Set `UPSTREAM_API_KEY` when LocalAI API-key authentication is enabled.
 
 ## Custom OpenAI-compatible server
 
-Use `custom` for vLLM, text-generation-inference adapters, remote private
+Use `custom` for vLLM, OpenAI-compatible cloud services,
+text-generation-inference adapters, remote private
 endpoints, or another compatible implementation:
 
 ```dotenv
@@ -98,9 +100,35 @@ credentials.
 
 ## Multiple providers
 
-For hard isolation and predictable limits, run one `localm` instance per
-provider and give each instance its own hostname, allowlist, and API keys. This
-keeps routing explicit and lets each provider scale independently.
+Set `LOCALM_CONFIG` to a strict YAML file when several providers should share
+one client-facing API. Connections are ordered by priority and filtered by
+model and required capability. See [Configuration](configuration.md) and the
+tracked `localm.example.yaml`.
+
+Provider presets declare a compatible endpoint baseline. `/v1/capabilities` performs
+lazy `GET /models` discovery and uses model-level `capabilities` or
+`supported_features` metadata when a runtime provides it. For custom servers,
+declare advanced features explicitly instead of assuming tools, structured
+output, or reasoning support. The bundled provider presets include chat,
+Responses, embeddings, and streaming; an older runtime can override that list.
+
+Use separate LocalM deployments when providers belong to different security or
+operational trust boundaries. Named connections share client keys, rate limits,
+and concurrency controls within one process.
+
+## Endpoint compatibility
+
+LocalM forwards these native compatible operations:
+
+- `/v1/chat/completions`
+- `/v1/responses`
+- `/v1/embeddings`
+- `/v1/models`
+
+An upstream that lacks an endpoint should omit its capability. LocalM does not
+translate Responses requests into chat requests, emulate embeddings, or remove
+unsupported fields. Provider HTTP errors are normalized and their bodies are
+not exposed to clients.
 
 ## Runtime documentation
 

@@ -3,15 +3,18 @@ name: localm
 services:
   bridge:
     image: ghcr.io/usmhic/localm:${LOCALM_IMAGE_TAG:-prod}
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    pull_policy: missing
     env_file:
       - .env
     environment:
-      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      - UPSTREAM_BASE_URL=${UPSTREAM_BASE_URL:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:-}
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${LOCALM_BIND_ADDRESS:-127.0.0.1}:${LOCALM_PORT:-8080}:8080"
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
@@ -20,6 +23,13 @@ services:
     security_opt:
       - no-new-privileges:true
     user: "65532:65532"
+    pids_limit: 128
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -5,6 +5,11 @@ reducing messages to plain text. This makes it usable with agent frameworks
 that send `tools`, `tool_choice`, tool-call history, JSON schemas, or multimodal
 message content.
 
+For named connections, include `tools` (and `streaming` when applicable) in the
+connection capability profile. LocalM rejects tool-bearing requests before
+forwarding when the selected model has no declared tool capability. The legacy
+single-connection environment mode retains its pass-through compatibility.
+
 The gateway never executes a tool. Your application remains responsible for
 validating arguments, applying permissions, running the tool, and returning its
 result to the model.

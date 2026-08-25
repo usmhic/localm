@@ -1,178 +1,219 @@
-# localm
+# LocalM
 
-> Tired of the “token expired” message appearing exactly when your agent finally
-> starts doing useful work?
-
-What if you could run a model on your own GPU, keep using OpenAI-compatible
-clients, and expose only a tiny guarded API instead of your raw inference
-server? That is `localm`: a small, secure gateway between your apps and the
-local LLM runtime you already like.
+LocalM is a lightweight, open-source gateway that provides one dependable,
+secure, OpenAI-compatible API for local, self-hosted, and explicitly configured
+remote LLM providers.
 
 [![CI](https://github.com/usmhic/localm/actions/workflows/ci.yml/badge.svg)](https://github.com/usmhic/localm/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Why localm?
+![LocalM connects compatible LLM providers to one guarded client API](overview.png)
 
-- One OpenAI-compatible URL for Ollama, LM Studio, llama.cpp, LocalAI, or a
-  custom compatible server.
-- Streaming chat completions and `/v1/models` for existing SDKs and UIs.
-- Agent-ready pass-through for tools, tool calls, structured output, multimodal
-  messages, and provider-specific extensions.
-- API-key authentication, model allowlists, request limits, rate limits, and
-  concurrency controls in front of local inference.
-- Public Swagger UI at `/docs/` without making the model endpoint public.
-- A static, non-root container that is comfortable on Docker, GHCR, and
-  Dokploy.
-- No runtime dependencies and no telemetry.
+LocalM sits between clients and inference servers. It owns authentication,
+allowlists, limits, capability checks, and routing; the provider still owns
+model installation and inference. LocalM is intentionally not a model manager,
+chat application, workflow builder, or agent runtime.
 
-## Five-minute start
+## What it provides
 
-You need Docker and [Ollama](https://ollama.com/).
+- One compatible client URL for Ollama, LM Studio, llama.cpp, LocalAI, vLLM,
+  compatible cloud APIs, and custom servers.
+- `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/embeddings`, and
+  `GET /v1/models`.
+- Multiple named connections with deterministic model, capability, health, and
+  priority routing.
+- Authenticated, sanitized discovery through `GET /v1/capabilities`.
+- Streaming and pass-through of compatible extension fields.
+- Explicit checks for tools, structured output, reasoning, and image input.
+- Client API-key authentication, model allowlists, request/token limits,
+  per-key and per-IP rate limits, and bounded concurrency.
+- A static, non-root production container with no application runtime
+  dependencies.
+
+LocalM does not store prompts, responses, embeddings, or credentials. It does
+not enable telemetry or make background network calls. Public health and API
+documentation routes do not expose connection details.
+
+## How it works
+
+```text
+OpenAI-compatible client
+        |
+        v
+LocalM: auth -> limits -> model/capability policy -> routing
+        |
+        +----> Ollama / LM Studio / llama.cpp
+        +----> LocalAI / vLLM / compatible server
+        +----> explicitly trusted remote connection
+```
+
+The highest-priority known-healthy connection that serves the requested model
+and declares every required capability is selected. Unsupported feature fields
+are rejected; LocalM never removes them silently. Successful compatible fields
+pass through, while upstream error bodies are replaced with sanitized
+OpenAI-style errors.
+
+## Quick start with Ollama
+
+Requirements: Docker and [Ollama](https://ollama.com/).
 
 ```bash
 ollama run qwen3:8b
 cp .env.example .env
 ```
 
-Set `API_KEYS` in `.env` to a long random key, then run:
+Edit `.env` and set `API_KEYS` to a long, random value. The file is ignored by
+Git and the Docker build context. Then start the gateway:
 
 ```bash
 docker compose up -d
 ```
 
-Compose pulls `ghcr.io/usmhic/localm:prod`, the image published from `main`.
-Set `LOCALM_IMAGE_TAG=dev` in `.env` to follow development builds instead.
-
-Open <http://localhost:8080/docs/> or send a request:
+Compose binds LocalM to `127.0.0.1:8080` and uses Ollama on the Docker host by
+default. Open <http://localhost:8080/docs/> or call the API using the same key:
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer ${LOCALM_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3:8b","messages":[{"role":"user","content":"Why is local inference fun?"}]}'
+  -d '{"model":"qwen3:8b","messages":[{"role":"user","content":"Say hello."}]}'
 ```
 
-That is the whole required setup. The raw OpenAPI document lives at
-<http://localhost:8080/openapi.json>.
+Set `LOCALM_API_KEY` in your shell to the value placed in `API_KEYS`; it is only
+a client-side variable in this example. LocalM reads the comma-separated
+`API_KEYS` setting.
 
-For source development, `mise install` provides the Go version used by CI and
-the production image; the module remains compatible with Go 1.25 or newer.
+The Compose file pulls `ghcr.io/usmhic/localm:prod` when it is missing. Use
+`docker compose up --build` to build the current checkout instead.
 
-## Choose your local runtime
+## Other providers
 
-`ollama` is the default. To use another runtime, set two values:
+Legacy single-connection environment variables remain supported:
 
 ```dotenv
 LLM_PROVIDER=lmstudio
 UPSTREAM_BASE_URL=http://host.docker.internal:1234/v1
+ALLOWED_MODELS=your-loaded-model-id
 ```
 
-| Runtime | `LLM_PROVIDER` | Typical base URL |
+| Runtime | Provider value | Typical host URL |
 | --- | --- | --- |
 | Ollama | `ollama` | `http://localhost:11434/v1` |
 | LM Studio | `lmstudio` | `http://localhost:1234/v1` |
 | llama.cpp | `llamacpp` | `http://localhost:8080/v1` |
 | LocalAI | `localai` | `http://localhost:8080/v1` |
-| Any compatible API | `custom` | Your server’s `/v1` URL |
+| vLLM or compatible API | `custom` | Provider-specific `/v1` URL |
 
-The runtime can serve multiple models; list the ones clients may use with
-`ALLOWED_MODELS=model-a,model-b`. See [Provider setup](docs/providers.md) for
-copy-paste configurations and Docker networking notes.
+See [Provider setup](docs/providers.md) for runtime-specific notes.
 
-## Use it with an agent
+## Multiple connections
 
-Point an OpenAI-compatible agent or SDK at `http://localhost:8080/v1` and use
-your `localm` key. Tool definitions and tool-call messages pass through to the
-selected runtime unchanged.
+Copy [localm.example.yaml](localm.example.yaml) to the ignored `localm.yaml`,
+then set `LOCALM_CONFIG` to that file's path. Every connection model must also
+appear in the global `ALLOWED_MODELS` environment setting.
 
-```python
-import os
-from openai import OpenAI
+```yaml
+allow_remote: true
+connections:
+  local:
+    provider: ollama
+    base_url: http://localhost:11434/v1
+    priority: 100
+    trust: local
+    models: [qwen3:8b]
 
-client = OpenAI(
-    base_url="http://localhost:8080/v1",
-    api_key=os.environ["LOCALM_API_KEY"],
-)
-
-response = client.chat.completions.create(
-    model="qwen3:8b",
-    messages=[{"role": "user", "content": "Say hello from my GPU."}],
-)
-print(response.choices[0].message.content)
+  remote:
+    provider: custom
+    base_url: https://example.com/v1
+    api_key_env: REMOTE_LLM_API_KEY
+    priority: 50
+    trust: remote
+    models: [qwen3:8b]
+    capabilities: [chat_completions, responses, embeddings, streaming]
 ```
 
-See [Agent and tool-calling guide](docs/agents.md) for a complete local tool
-loop and runtime-specific notes.
+Remote routing requires both `allow_remote: true` and `trust: remote`. Upstream
+keys are referenced by environment-variable name and are never written inline
+in YAML. Valid capabilities are `chat_completions`, `responses`, `embeddings`,
+`streaming`, `tools`, `structured_output`, `reasoning`, and `vision`.
 
-## API surface
+For Docker, mount the YAML file read-only as described in
+[Deployment](docs/deployment.md).
 
-| Endpoint | Auth | Purpose |
+## API
+
+| Endpoint | Authentication | Purpose |
 | --- | --- | --- |
 | `POST /v1/chat/completions` | Bearer key | Chat, streaming, tools, and compatible extensions |
-| `GET /v1/models` | Bearer key | Models exposed by `ALLOWED_MODELS` |
-| `GET /healthz` | Public | Process liveness |
-| `GET /readyz` | Public | Upstream model-server readiness |
-| `GET /docs/` | Public | Interactive Swagger UI |
-| `GET /openapi.json` | Public | OpenAPI document |
+| `POST /v1/responses` | Bearer key | Responses API |
+| `POST /v1/embeddings` | Bearer key | Embeddings API |
+| `GET /v1/models` | Bearer key | Globally allowed models |
+| `GET /v1/capabilities` | Bearer key | Sanitized connection/model capability discovery |
+| `GET /healthz` | Public | Process liveness only |
+| `GET /readyz` | Public | Aggregate readiness only |
+| `GET /docs/` | Public | Swagger UI |
+| `GET /openapi.json` | Public | Embedded OpenAPI document |
 
-`localm` intentionally stays focused: it is an access gateway, not a model
-manager and not an agent runtime. Your chosen inference server loads models;
-your application executes tools.
+The full configuration reference is in
+[docs/configuration.md](docs/configuration.md). The tracked
+[.env.example](.env.example) lists every supported environment setting with
+empty values so it is safe to copy and commit.
 
-## Configuration
+## Development
 
-Only `API_KEYS` is required for the default Docker Compose setup.
+The Go version is pinned in [mise.toml](mise.toml) and the container builder.
+Go 1.25 or newer is supported.
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `API_KEYS` | required | Comma-separated client keys |
-| `ALLOWED_MODELS` | `qwen3:8b` | Comma-separated model allowlist |
-| `LLM_PROVIDER` | `ollama` | Provider preset |
-| `UPSTREAM_BASE_URL` | provider default | OpenAI-compatible `/v1` URL |
-| `UPSTREAM_API_KEY` | empty | Optional key for the upstream server |
-| `MAX_TOKENS` | `1024` | Maximum accepted output-token request |
-| `DEFAULT_MAX_TOKENS` | `512` | Added when the client omits a token limit |
-| `MAX_CONCURRENT_LLM` | `4` | Concurrent upstream requests per replica |
-| `RATE_LIMIT_PER_KEY_RPM` | `60` | Requests per key per minute, per replica |
-| `RATE_LIMIT_PER_IP_RPM` | `120` | Requests per IP per minute, per replica |
-
-Advanced timeout, body-size, listener, and CORS settings are documented in
-[Configuration](docs/configuration.md). `OLLAMA_BASE_URL` and
-`MAX_CONCURRENT_OLLAMA` remain supported as compatibility aliases.
-
-## Architecture and deployment
-
-```text
-OpenAI client / agent
-        │
-        ▼
- localm ── auth · limits · allowlist · streaming
-        │
-        ▼
-Ollama / LM Studio / llama.cpp / LocalAI / custom API
-        │
-        ▼
-     local CPU or GPU
+```bash
+mise install
+go mod download
+gofmt -w *.go
+go test -race ./...
+go vet ./...
+go build ./...
+docker compose --no-interpolate config --quiet
+docker build -t localm:test .
 ```
 
-- [Architecture and scaling](docs/architecture.md)
-- [Docker, GHCR, and Dokploy deployment](docs/deployment.md)
-- [Engineering standards](STANDARDS.md)
-- [Coding-agent guide](AGENTS.md)
-- [Security policy](SECURITY.md)
-
-CI runs formatting, race-enabled tests, static analysis, and a production image
-build. Pushes to `dev` and `main` publish multi-architecture `dev` and
-`prod`/`latest` images; `vX.Y.Z` tags create GitHub releases.
+CI runs formatting, dependency verification, race-enabled tests, static
+analysis, a secret-history scan, Compose validation, a production image build,
+and a container smoke test. Successful `dev` and `main` CI runs publish
+multi-architecture images to GHCR.
 
 ## Contributing
 
-Small fixes, provider compatibility reports, tests, and documentation
-improvements are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), open an
-issue, or start a discussion before a large change.
+Contributions are welcome when they keep LocalM small and gateway-focused.
 
-By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+1. Search existing issues and discuss large or boundary-changing work first.
+2. Create a focused branch and avoid mixing unrelated cleanup into the change.
+3. Add tests for new behavior, especially validation, upstream errors,
+   cancellation, and streaming.
+4. Update OpenAPI, examples, and operator documentation with public API or
+   configuration changes.
+5. Run the development checks above before opening a pull request.
+6. Explain compatibility, security, and deployment impact in the pull request.
+
+Never commit real or previously valid credentials, authorization headers,
+private prompts, model output, internal URLs, customer data, `.env`, or local
+connection files. Use unmistakably synthetic test values. If sensitive data is
+committed, treat it as compromised, rotate it immediately, and report it
+privately rather than attempting to hide it in a later commit.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow,
+[SECURITY.md](SECURITY.md) for vulnerability reporting, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before participating.
+
+## Documentation
+
+- [Architecture and scaling](docs/architecture.md)
+- [Configuration reference](docs/configuration.md)
+- [Provider setup](docs/providers.md)
+- [Deployment](docs/deployment.md)
+- [Agent and tool-calling guide](docs/agents.md)
+- [Engineering standards](STANDARDS.md)
+- [Coding-agent guide](AGENTS.md)
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Maintained by [usmhic](https://github.com/usmhic).
+LocalM is available under the [MIT License](LICENSE) and maintained by
+[usmhic](https://github.com/usmhic).

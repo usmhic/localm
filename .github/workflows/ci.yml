@@ -16,47 +16,114 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Test and vet
+  secrets:
+    name: Secret history
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan history and working tree
+        shell: bash
+        env:
+          GITLEAKS_VERSION: 8.27.2
+        run: |
+          set -euo pipefail
+          tool_dir="$(mktemp -d)"
+          cd "$tool_dir"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          release_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl --fail --silent --show-error --location --output "$archive" "$release_url/$archive"
+          curl --fail --silent --show-error --location --output checksums.txt "$release_url/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep "  $archive$" checksums.txt | sha256sum --check -
+          tar --extract --gzip --file "$archive" gitleaks
+          ./gitleaks git --redact --no-banner "$GITHUB_WORKSPACE"
+          ./gitleaks dir --redact --no-banner "$GITHUB_WORKSPACE"
+
+  test:
+    name: Test and static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26.5"
-          cache: false
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Verify dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Lint GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
       - name: Check formatting
         shell: bash
         run: test -z "$(gofmt -l *.go)"
 
       - name: Run tests with race detector
-        run: go test -race ./...
+        run: go test -race -count=1 ./...
 
-      - name: Run go vet
+      - name: Run static analysis
         run: go vet ./...
 
-  docker:
-    name: Build container
+      - name: Build binary
+        run: go build -trimpath ./...
+
+  container:
+    name: Validate and smoke-test container
+    needs:
+      - secrets
+      - test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate Compose configuration
+        shell: bash
+        run: |
+          cp .env.example .env
+          docker compose --no-interpolate config --quiet
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Build runtime image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           file: ./Dockerfile
+          load: true
           push: false
           tags: localm:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke-test runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_name="localm-ci-${GITHUB_RUN_ID}"
+          trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name "$container_name" --read-only --cap-drop ALL --security-opt no-new-privileges --user 65532:65532 --env API_KEYS=ci-smoke-value-not-a-secret --publish 127.0.0.1:18080:8080 localm:ci
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 1 http://127.0.0.1:18080/healthz >/dev/null
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18080/v1/models)" = "401"

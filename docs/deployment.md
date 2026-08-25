@@ -8,12 +8,29 @@ docker compose up -d
 curl http://localhost:8080/healthz
 ```
 
-Compose always pulls `ghcr.io/usmhic/localm:prod`, which is published by the
-`main` workflow. Set `LOCALM_IMAGE_TAG=dev` in `.env` to use the image published
-by the `dev` workflow. Compose binds `8080` to localhost by default. Put an HTTPS
-reverse proxy or secure tunnel in front of the gateway before remote access.
-The GHCR package must be public; otherwise run `docker login ghcr.io` before
-starting Compose.
+Compose pulls `ghcr.io/usmhic/localm:prod` when it is missing. Set
+`LOCALM_IMAGE_TAG=dev` in `.env` to use the development image, or run
+`docker compose up --build` to build the current checkout. Compose binds port
+`8080` to `127.0.0.1` by default; `LOCALM_BIND_ADDRESS` and `LOCALM_PORT` can
+change that mapping explicitly. Put an HTTPS reverse proxy or secure tunnel in
+front of the gateway before remote access. The GHCR package must be public;
+otherwise run `docker login ghcr.io` before starting Compose.
+
+The bundled Compose path remains the minimal single-Ollama setup. For named
+connections, mount a read-only file and point `LOCALM_CONFIG` at its container
+path in a Compose override:
+
+```yaml
+services:
+  bridge:
+    environment:
+      LOCALM_CONFIG: /etc/localm/config.yaml
+    volumes:
+      - ./localm.yaml:/etc/localm/config.yaml:ro
+```
+
+Keep upstream keys in deployment secrets/environment variables referenced by
+`api_key_env`; do not put them in the mounted YAML file.
 
 ## GHCR
 
@@ -25,7 +42,8 @@ docker pull ghcr.io/usmhic/localm:prod
 ```
 
 Immutable commit tags use `dev-<sha>` and `prod-<sha>`. `latest` follows
-`main`.
+`main`. Images publish only after the exact `dev` or `main` revision passes CI,
+and published manifests include BuildKit provenance and an SBOM.
 
 ## Dokploy
 
@@ -60,8 +78,13 @@ container port and environment configuration.
 - Terminate TLS at a trusted reverse proxy.
 - Generate unique, high-entropy client keys and store them as secrets.
 - Keep the raw inference server on a private network.
+- Keep `allow_remote` disabled unless off-network routing is intentional, and
+  review every `trust: remote` connection.
 - Use a narrow model allowlist.
 - Set CPU, memory, and replica limits in the orchestrator.
 - Send logs to a protected sink; prompts and responses are not logged.
-- Monitor `/healthz`, `/readyz`, latency, HTTP 429s, and upstream failures.
+- Keep bounded log rotation enabled and avoid adding client IPs or raw transport
+  errors to application logs.
+- Monitor `/healthz`, `/readyz`, sanitized `/v1/capabilities`, latency, HTTP
+  429s, and upstream failures.
 - Pin an immutable `prod-<sha>` image when reproducibility matters.

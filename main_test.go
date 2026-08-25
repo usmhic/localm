@@ -71,6 +71,15 @@ func TestPublicSwaggerDocs(t *testing.T) {
 	if spec["openapi"] != "3.0.3" {
 		t.Fatalf("unexpected OpenAPI version: %v", spec["openapi"])
 	}
+	paths, ok := spec["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("OpenAPI paths missing: %#v", spec["paths"])
+	}
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/embeddings", "/v1/capabilities"} {
+		if _, ok := paths[path]; !ok {
+			t.Errorf("OpenAPI path %s is missing", path)
+		}
+	}
 }
 
 func TestUnauthorized(t *testing.T) {

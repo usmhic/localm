@@ -6,16 +6,20 @@ WORKDIR /src
 ARG TARGETOS
 ARG TARGETARCH
 
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download && go mod verify
+
 COPY *.go ./
-RUN go mod download
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags='-s -w -extldflags "-static"' -o /out/localm .
 
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 LABEL org.opencontainers.image.title="localm" \
-      org.opencontainers.image.description="Secure OpenAI-compatible gateway for local LLM runtimes" \
+      org.opencontainers.image.description="Secure OpenAI-compatible gateway for local, self-hosted, and remote LLM providers" \
       org.opencontainers.image.source="https://github.com/usmhic/localm" \
       org.opencontainers.image.authors="usmhic" \
       org.opencontainers.image.licenses="MIT"

@@ -41,9 +41,9 @@ docker pull ghcr.io/usmhic/localm:dev
 docker pull ghcr.io/usmhic/localm:prod
 ```
 
-Immutable commit tags use `dev-<sha>` and `prod-<sha>`. `latest` follows
-`main`. Images publish only after the exact `dev` or `main` revision passes CI,
-and published manifests include BuildKit provenance and an SBOM.
+Immutable commit tags use `dev-<sha>` and `prod-<sha>`. The same CI workflow
+tests and publishes pushes to `dev` and `main`; pull requests never publish.
+Published manifests include BuildKit provenance and an SBOM.
 
 ## Dokploy
 

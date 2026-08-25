@@ -175,10 +175,10 @@ docker compose --no-interpolate config --quiet
 docker build -t localm:test .
 ```
 
-CI runs formatting, dependency verification, race-enabled tests, static
-analysis, a secret-history scan, Compose validation, a production image build,
-and a container smoke test. Successful `dev` and `main` CI runs publish
-multi-architecture images to GHCR.
+One CI workflow runs formatting, dependency verification, race-enabled tests,
+static analysis, secret scanning, Compose validation, and a container smoke
+test. Successful pushes to `dev` and `main` publish multi-architecture images to
+GHCR.
 
 ## Contributing
 

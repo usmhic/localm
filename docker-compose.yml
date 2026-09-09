@@ -2,7 +2,7 @@ name: localm
 
 services:
   bridge:
-    image: ghcr.io/usmhic/localm:${LOCALM_IMAGE_TAG:-prod}
+    image: ghcr.io/usmhic/localm:${LOCALM_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile

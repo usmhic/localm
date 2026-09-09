@@ -24,6 +24,7 @@ All notable changes to localm are documented here. The format follows
 
 ### Changed
 
+- Added a documented package-naming contract for the Go module, executable package, and container image.
 - Aligned container, Compose, documentation, dependency-update, and ownership
   metadata with the usmhic open-source ecosystem.
 - Removed client IPs and raw relay errors from request logs and connection counts

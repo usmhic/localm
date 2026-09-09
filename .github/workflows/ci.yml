@@ -113,7 +113,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           outputs: type=image,push=true,oci-artifact=false
           tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name == 'main' && 'prod' || 'dev' }}
-            ghcr.io/${{ github.repository }}:${{ github.ref_name == 'main' && 'prod' || 'dev' }}-${{ github.sha }}
+            ghcr.io/${{ github.repository }}:${{ github.ref_name == 'main' && 'latest' || 'dev' }}
+            ghcr.io/${{ github.repository }}:${{ github.ref_name == 'main' && 'latest' || 'dev' }}-${{ github.sha }}
           provenance: mode=max
           sbom: true

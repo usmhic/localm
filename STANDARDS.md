@@ -47,6 +47,8 @@ ceremonial layers.
 | Environment variables | uppercase snake case; public browser variables use the framework prefix |
 | Packages/modules | follow the language and framework convention already used by the project |
 
+See [PACKAGE_NAMING.md](./PACKAGE_NAMING.md) for this repository's concrete package identifiers and compatibility rules.
+
 External URLs always use the real GitHub owner and repository name. Historical
 product spellings or package scopes may remain when renaming would break users;
 explain them once in the README.

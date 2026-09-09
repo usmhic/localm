@@ -83,7 +83,7 @@ Set `LOCALM_API_KEY` in your shell to the value placed in `API_KEYS`; it is only
 a client-side variable in this example. LocalM reads the comma-separated
 `API_KEYS` setting.
 
-The Compose file pulls `ghcr.io/usmhic/localm:prod` when it is missing. Use
+The Compose file pulls `ghcr.io/usmhic/localm:latest` when it is missing. Use
 `docker compose up --build` to build the current checkout instead.
 
 ## Other providers
@@ -211,6 +211,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow,
 - [Deployment](docs/deployment.md)
 - [Agent and tool-calling guide](docs/agents.md)
 - [Engineering standards](STANDARDS.md)
+- [Package naming](PACKAGE_NAMING.md) - public module, executable, and image identifiers
 - [Coding-agent guide](AGENTS.md)
 
 ## License

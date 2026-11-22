@@ -8,6 +8,21 @@ All notable changes to localm are documented here. The format follows
 
 ### Added
 
+- Optional web research, `POST /v1/search`: up to five queries on a self-hosted
+  SearXNG, results merged round-robin and de-duplicated, and the top pages read
+  as plain text. Page reads are public-address-only (checked at dial time,
+  redirects re-checked), on ports 80/443, with size, time and type limits.
+  Queries and pages are never logged or stored.
+- Failover: a connection that can't be reached or answers 429/5xx before
+  anything was relayed is skipped for the next eligible one (`FAILOVER`).
+- Failing connections are paused, from `FAILURE_PAUSE` doubling to
+  `FAILURE_PAUSE_MAX`, and tried after every other candidate.
+- A bounded queue for busy slots (`MAX_QUEUED_LLM`, `QUEUE_TIMEOUT`).
+- `/v1/capabilities` reports the current load, connection pauses and whether
+  search is enabled.
+- A local stack (`deploy/stack`, `scripts/stack.sh`): Ollama, SearXNG and
+  LocalM on one machine, with model sizing, checks and an optional Cloudflare
+  tunnel.
 - Optional strict YAML configuration for multiple named connections with
   explicit local/remote trust, model subsets, capability profiles, and priority
   routing.

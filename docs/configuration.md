@@ -21,6 +21,11 @@ values retain their existing behavior and fall back to safe defaults.
 | `RATE_LIMIT_PER_KEY_RPM` | `60` | Per-key requests per minute per replica |
 | `RATE_LIMIT_PER_IP_RPM` | `120` | Per-IP requests per minute per replica |
 | `MAX_CONCURRENT_LLM` | `4` | Simultaneous upstream requests per replica |
+| `MAX_QUEUED_LLM` | `0` | Requests that may wait for a busy slot instead of an immediate 429 |
+| `QUEUE_TIMEOUT` | `30s` | Longest wait in that queue |
+| `FAILOVER` | `true` | Try the next eligible connection when one fails before responding |
+| `FAILURE_PAUSE` | `15s` | How long a failing connection goes to the back of the line |
+| `FAILURE_PAUSE_MAX` | `5m` | Ceiling for the pause, which doubles per consecutive failure |
 | `UPSTREAM_TIMEOUT` | `120s` | Whole upstream inference timeout |
 | `READINESS_TIMEOUT` | `3s` | Total discovery/readiness request timeout |
 | `CAPABILITY_DISCOVERY_TTL` | `30s` | In-memory model discovery cache lifetime |
@@ -30,6 +35,7 @@ values retain their existing behavior and fall back to safe defaults.
 | `SERVER_IDLE_TIMEOUT` | `60s` | Keep-alive idle timeout |
 | `CORS_ENABLED` | `false` | Enable browser cross-origin access |
 | `CORS_ALLOWED_ORIGINS` | empty | Comma-separated exact origins, or `*` |
+| `SEARCH_BASE_URL` | empty | Enables `/v1/search` with this SearXNG instance; see [Web research](search.md) for the `SEARCH_*` settings |
 
 `OLLAMA_BASE_URL` remains a compatibility alias when `LLM_PROVIDER=ollama` and
 `UPSTREAM_BASE_URL` is absent. `MAX_CONCURRENT_OLLAMA` remains a fallback for

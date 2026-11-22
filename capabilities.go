@@ -113,6 +113,10 @@ type connection struct {
 	discovered map[string]ProviderModel
 	healthy    bool
 	checkedAt  time.Time
+	// A connection that failed is paused: routing tries other connections
+	// first until pausedUntil. Consecutive failures double the pause.
+	failures    int
+	pausedUntil time.Time
 }
 
 func (c *connection) allowsModel(model string) bool { _, ok := c.config.Models[model]; return ok }
@@ -128,6 +132,35 @@ func (c *connection) routingEligible(model string) bool {
 	}
 	_, available := c.discovered[model]
 	return available
+}
+
+// recordFailure pauses the connection for base, doubled per consecutive
+// failure, up to max.
+func (c *connection) recordFailure(now time.Time, base, max time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failures++
+	pause := base
+	for i := 1; i < c.failures && pause < max; i++ {
+		pause *= 2
+	}
+	if pause > max {
+		pause = max
+	}
+	c.pausedUntil = now.Add(pause)
+}
+
+func (c *connection) recordSuccess() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failures = 0
+	c.pausedUntil = time.Time{}
+}
+
+func (c *connection) pausedAt(now time.Time) (bool, time.Time) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return now.Before(c.pausedUntil), c.pausedUntil
 }
 
 func (c *connection) capabilitiesForModel(model string) CapabilitySet {

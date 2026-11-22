@@ -27,6 +27,8 @@ type Bridge struct {
 	keyLimiter   *fixedWindowLimiter
 	ipLimiter    *fixedWindowLimiter
 	semaphore    chan struct{}
+	queued       atomic.Int64
+	searcher     *searchService
 	shuttingDown atomic.Bool
 }
 
@@ -128,7 +130,7 @@ func newBridge(cfg Config, client *http.Client) *Bridge {
 		}
 		return connections[i].config.Priority > connections[j].config.Priority
 	})
-	return &Bridge{cfg: cfg, connections: connections, keyLimiter: newFixedWindowLimiter(cfg.RateLimitPerKeyRPM, time.Minute), ipLimiter: newFixedWindowLimiter(cfg.RateLimitPerIPRPM, time.Minute), semaphore: make(chan struct{}, cfg.MaxConcurrent)}
+	return &Bridge{cfg: cfg, connections: connections, keyLimiter: newFixedWindowLimiter(cfg.RateLimitPerKeyRPM, time.Minute), ipLimiter: newFixedWindowLimiter(cfg.RateLimitPerIPRPM, time.Minute), semaphore: make(chan struct{}, cfg.MaxConcurrent), searcher: newSearchService(cfg.Search, nil)}
 }
 
 func newFixedWindowLimiter(limit int, window time.Duration) *fixedWindowLimiter {
@@ -172,6 +174,7 @@ func (b *Bridge) routes() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", b.inference(inferenceSpec{operation: CapabilityChatCompletions, requiredField: "messages", tokenFields: []string{"max_tokens", "max_completion_tokens"}}))
 	mux.HandleFunc("/v1/responses", b.inference(inferenceSpec{operation: CapabilityResponses, requiredField: "input", tokenFields: []string{"max_output_tokens"}}))
 	mux.HandleFunc("/v1/embeddings", b.inference(inferenceSpec{operation: CapabilityEmbeddings, requiredField: "input"}))
+	mux.HandleFunc("/v1/search", b.search)
 	return b.withLogging(b.withCORS(mux))
 }
 
@@ -293,9 +296,49 @@ func (b *Bridge) capabilities(w http.ResponseWriter, r *http.Request) {
 		if !checkedAt.IsZero() {
 			item["checked_at"] = checkedAt.UTC().Format(time.RFC3339)
 		}
+		if isPaused, until := connection.pausedAt(time.Now()); isPaused {
+			item["paused_until"] = until.UTC().Format(time.RFC3339)
+		}
 		data = append(data, item)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+	search := map[string]any{"enabled": b.searcher != nil}
+	if b.searcher != nil {
+		search["provider"] = b.searcher.cfg.Provider
+		search["max_results"] = b.searcher.cfg.MaxResults
+		search["max_read_pages"] = b.searcher.cfg.MaxReadPages
+	}
+	load := map[string]any{"active": len(b.semaphore), "max_concurrent": cap(b.semaphore), "queued": b.queued.Load(), "max_queued": b.cfg.MaxQueued}
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data, "load": load, "search": search})
+}
+
+// acquireSlot takes an upstream slot, waiting up to QUEUE_TIMEOUT in a bounded
+// queue when MAX_QUEUED_LLM allows it. It returns false when the gateway is
+// saturated, so the client can retry or send the request elsewhere.
+func (b *Bridge) acquireSlot(ctx context.Context) (func(), bool) {
+	release := func() { <-b.semaphore }
+	select {
+	case b.semaphore <- struct{}{}:
+		return release, true
+	default:
+	}
+	if b.cfg.MaxQueued <= 0 {
+		return nil, false
+	}
+	if b.queued.Add(1) > int64(b.cfg.MaxQueued) {
+		b.queued.Add(-1)
+		return nil, false
+	}
+	defer b.queued.Add(-1)
+	timer := time.NewTimer(b.cfg.QueueTimeout)
+	defer timer.Stop()
+	select {
+	case b.semaphore <- struct{}{}:
+		return release, true
+	case <-timer.C:
+		return nil, false
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 func (b *Bridge) inference(spec inferenceSpec) http.HandlerFunc {
@@ -322,13 +365,12 @@ func (b *Bridge) inference(spec inferenceSpec) http.HandlerFunc {
 			writeOpenAIError(w, http.StatusTooManyRequests, "rate limit exceeded for ip", "rate_limit_error", "", "rate_limit_exceeded")
 			return
 		}
-		select {
-		case b.semaphore <- struct{}{}:
-			defer func() { <-b.semaphore }()
-		default:
+		release, ok := b.acquireSlot(r.Context())
+		if !ok {
 			writeOpenAIError(w, http.StatusTooManyRequests, "too many concurrent requests", "rate_limit_error", "", "concurrency_limit_exceeded")
 			return
 		}
+		defer release()
 
 		r.Body = http.MaxBytesReader(w, r.Body, b.cfg.MaxBodyBytes)
 		defer r.Body.Close()
@@ -365,8 +407,8 @@ func (b *Bridge) inference(spec inferenceSpec) http.HandlerFunc {
 			return
 		}
 		required, stream := requiredCapabilities(spec.operation, fields)
-		selected, missing := b.selectConnection(model, required)
-		if selected == nil {
+		candidates, missing := b.selectConnections(model, required, time.Now())
+		if len(candidates) == 0 {
 			if missing != "" {
 				writeOpenAIError(w, http.StatusBadRequest, "requested feature is not supported for this model", "invalid_request_error", missing, "unsupported_feature")
 			} else {
@@ -374,18 +416,62 @@ func (b *Bridge) inference(spec inferenceSpec) http.HandlerFunc {
 			}
 			return
 		}
+		if !b.cfg.Failover {
+			candidates = candidates[:1]
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), b.cfg.UpstreamTimeout)
 		defer cancel()
-		upstreamResp, err := selected.provider.Forward(ctx, spec.operation, payload)
+		b.forward(ctx, w, r, spec.operation, payload, stream, candidates)
+	}
+}
+
+// forward sends the request to the first candidate and, while nothing has been
+// relayed to the client yet, moves to the next one when a connection can't be
+// reached or answers 429/5xx. A connection that fails is paused (see
+// recordFailure). The last candidate's answer is relayed whatever it is.
+func (b *Bridge) forward(ctx context.Context, w http.ResponseWriter, r *http.Request, operation string, payload []byte, stream bool, candidates []*connection) {
+	for i, selected := range candidates {
+		last := i == len(candidates)-1
+		upstreamResp, err := selected.provider.Forward(ctx, operation, payload)
 		if err != nil {
+			if r.Context().Err() != nil {
+				return // The client went away; there is nobody to answer.
+			}
+			selected.recordFailure(time.Now(), b.cfg.FailurePause, b.cfg.FailurePauseMax)
+			if !last && ctx.Err() == nil {
+				continue
+			}
 			writeOpenAIError(w, http.StatusBadGateway, "upstream request failed", "server_error", "", "upstream_error")
 			return
 		}
-		defer upstreamResp.Body.Close()
-		if err := relayProviderResponse(w, upstreamResp, stream); err != nil {
+		status := upstreamResp.StatusCode
+		if !last && retryableUpstreamStatus(status) {
+			_, _ = io.Copy(io.Discard, io.LimitReader(upstreamResp.Body, 1<<20))
+			upstreamResp.Body.Close()
+			if status >= http.StatusInternalServerError {
+				selected.recordFailure(time.Now(), b.cfg.FailurePause, b.cfg.FailurePauseMax)
+			}
+			continue
+		}
+		if status < http.StatusInternalServerError {
+			selected.recordSuccess()
+		} else {
+			selected.recordFailure(time.Now(), b.cfg.FailurePause, b.cfg.FailurePauseMax)
+		}
+		err = relayProviderResponse(w, upstreamResp, stream)
+		upstreamResp.Body.Close()
+		if err != nil {
 			log.Printf("{\"level\":\"error\",\"msg\":\"upstream_response_error\",\"connection\":%q,\"provider\":%q,\"error\":\"relay_failed\"}", selected.config.Name, selected.provider.Name())
 		}
+		return
 	}
+}
+
+// retryableUpstreamStatus reports whether another connection may succeed where
+// this one answered: it was busy or failed, rather than rejecting the request.
+func retryableUpstreamStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusInternalServerError ||
+		status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
 type tokenValidationError struct{ param, message string }
@@ -452,23 +538,36 @@ func requiredCapabilities(operation string, fields map[string]json.RawMessage) (
 	return required, stream
 }
 
-func (b *Bridge) selectConnection(model string, required CapabilitySet) (*connection, string) {
+// selectConnections returns the connections that may serve the request, in
+// routing order: by priority, with paused connections after every other one, so
+// a failing connection is still tried when nothing else can serve. When none
+// qualifies, missing names a required capability no serving connection has.
+func (b *Bridge) selectConnections(model string, required CapabilitySet, now time.Time) ([]*connection, string) {
 	served := false
 	missingSet := make(map[string]struct{})
+	var ready, paused []*connection
 	for _, connection := range b.connections {
 		if !connection.allowsModel(model) || !connection.routingEligible(model) {
 			continue
 		}
 		served = true
 		capabilities := connection.capabilitiesForModel(model)
-		if capabilities.ContainsAll(required) {
-			return connection, ""
-		}
-		for capability := range required {
-			if !capabilities[capability] {
-				missingSet[capability] = struct{}{}
+		if !capabilities.ContainsAll(required) {
+			for capability := range required {
+				if !capabilities[capability] {
+					missingSet[capability] = struct{}{}
+				}
 			}
+			continue
 		}
+		if isPaused, _ := connection.pausedAt(now); isPaused {
+			paused = append(paused, connection)
+		} else {
+			ready = append(ready, connection)
+		}
+	}
+	if candidates := append(ready, paused...); len(candidates) > 0 {
+		return candidates, ""
 	}
 	if !served {
 		return nil, ""

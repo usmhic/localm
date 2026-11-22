@@ -32,6 +32,12 @@ services:
 Keep upstream keys in deployment secrets/environment variables referenced by
 `api_key_env`; do not put them in the mounted YAML file.
 
+## Local stack
+
+To run the models and web search on the same machine as LocalM, use the
+[local stack](local-stack.md): `scripts/stack.sh up` starts Ollama, SearXNG and
+LocalM, with an optional Cloudflare tunnel.
+
 ## GHCR
 
 The repository publishes development and production images:

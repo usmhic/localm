@@ -44,6 +44,17 @@ type Config struct {
 	ServerIdleTimeout  time.Duration
 	ReadinessTimeout   time.Duration
 	DiscoveryTTL       time.Duration
+	// MaxQueued requests may wait up to QueueTimeout for a busy slot instead of
+	// receiving an immediate 429; zero keeps the immediate rejection.
+	MaxQueued    int
+	QueueTimeout time.Duration
+	// Failover retries the next eligible connection when one fails before any
+	// response byte was relayed. A failing connection is paused, starting at
+	// FailurePause and doubling to FailurePauseMax while it keeps failing.
+	Failover        bool
+	FailurePause    time.Duration
+	FailurePauseMax time.Duration
+	Search          SearchConfig
 }
 
 type ConnectionConfig struct {
@@ -89,6 +100,11 @@ func loadConfig() (Config, error) {
 		ServerIdleTimeout:  getEnvDuration("SERVER_IDLE_TIMEOUT", 60*time.Second),
 		ReadinessTimeout:   getEnvDuration("READINESS_TIMEOUT", 3*time.Second),
 		DiscoveryTTL:       getEnvDuration("CAPABILITY_DISCOVERY_TTL", 30*time.Second),
+		MaxQueued:          getEnvInt("MAX_QUEUED_LLM", 0),
+		QueueTimeout:       getEnvDuration("QUEUE_TIMEOUT", 30*time.Second),
+		Failover:           getEnvBool("FAILOVER", true),
+		FailurePause:       getEnvDuration("FAILURE_PAUSE", 15*time.Second),
+		FailurePauseMax:    getEnvDuration("FAILURE_PAUSE_MAX", 5*time.Minute),
 	}
 	cfg.APIKeys = parseCSV(getEnv("API_KEYS", ""))
 	if len(cfg.APIKeys) == 0 {
@@ -102,6 +118,11 @@ func loadConfig() (Config, error) {
 		return Config{}, err
 	}
 	cfg.CORSAllowedOrigins = stringSet(parseCSV(getEnv("CORS_ALLOWED_ORIGINS", "")))
+	search, err := loadSearchConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Search = search
 
 	configPath := strings.TrimSpace(os.Getenv("LOCALM_CONFIG"))
 	if configPath == "" {
@@ -142,6 +163,12 @@ func validateCommonConfig(cfg *Config) error {
 	}
 	if cfg.DiscoveryTTL <= 0 {
 		return errors.New("CAPABILITY_DISCOVERY_TTL must be positive")
+	}
+	if cfg.MaxQueued < 0 || cfg.QueueTimeout <= 0 {
+		return errors.New("MAX_QUEUED_LLM must not be negative and QUEUE_TIMEOUT must be positive")
+	}
+	if cfg.FailurePause < 0 || cfg.FailurePauseMax < cfg.FailurePause {
+		return errors.New("FAILURE_PAUSE must not be negative and FAILURE_PAUSE_MAX must be at least FAILURE_PAUSE")
 	}
 	return nil
 }

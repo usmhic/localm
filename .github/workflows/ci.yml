@@ -65,6 +65,8 @@ jobs:
           set -euo pipefail
           cp .env.example .env
           docker compose config --no-interpolate --quiet
+          docker compose -f deploy/stack/compose.yaml -f deploy/stack/compose.gpu.yaml config --no-interpolate --quiet
+          bash -n scripts/stack.sh
           docker build -t localm:ci .
           container_name="localm-ci-${GITHUB_RUN_ID}"
           trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT

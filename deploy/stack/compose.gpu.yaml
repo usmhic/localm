@@ -1,0 +1,11 @@
+# NVIDIA GPUs on Linux (scripts/stack.sh adds this file when nvidia-smi works). Needs the NVIDIA
+# Container Toolkit. On a Mac, run Ollama natively instead: Docker can't use Apple's GPU.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

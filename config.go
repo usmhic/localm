@@ -54,7 +54,6 @@ type Config struct {
 	Failover        bool
 	FailurePause    time.Duration
 	FailurePauseMax time.Duration
-	Search          SearchConfig
 }
 
 type ConnectionConfig struct {
@@ -118,11 +117,6 @@ func loadConfig() (Config, error) {
 		return Config{}, err
 	}
 	cfg.CORSAllowedOrigins = stringSet(parseCSV(getEnv("CORS_ALLOWED_ORIGINS", "")))
-	search, err := loadSearchConfig()
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.Search = search
 
 	configPath := strings.TrimSpace(os.Getenv("LOCALM_CONFIG"))
 	if configPath == "" {

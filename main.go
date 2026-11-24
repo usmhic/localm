@@ -28,7 +28,6 @@ type Bridge struct {
 	ipLimiter    *fixedWindowLimiter
 	semaphore    chan struct{}
 	queued       atomic.Int64
-	searcher     *searchService
 	shuttingDown atomic.Bool
 }
 
@@ -130,7 +129,7 @@ func newBridge(cfg Config, client *http.Client) *Bridge {
 		}
 		return connections[i].config.Priority > connections[j].config.Priority
 	})
-	return &Bridge{cfg: cfg, connections: connections, keyLimiter: newFixedWindowLimiter(cfg.RateLimitPerKeyRPM, time.Minute), ipLimiter: newFixedWindowLimiter(cfg.RateLimitPerIPRPM, time.Minute), semaphore: make(chan struct{}, cfg.MaxConcurrent), searcher: newSearchService(cfg.Search, nil)}
+	return &Bridge{cfg: cfg, connections: connections, keyLimiter: newFixedWindowLimiter(cfg.RateLimitPerKeyRPM, time.Minute), ipLimiter: newFixedWindowLimiter(cfg.RateLimitPerIPRPM, time.Minute), semaphore: make(chan struct{}, cfg.MaxConcurrent)}
 }
 
 func newFixedWindowLimiter(limit int, window time.Duration) *fixedWindowLimiter {
@@ -174,7 +173,6 @@ func (b *Bridge) routes() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", b.inference(inferenceSpec{operation: CapabilityChatCompletions, requiredField: "messages", tokenFields: []string{"max_tokens", "max_completion_tokens"}}))
 	mux.HandleFunc("/v1/responses", b.inference(inferenceSpec{operation: CapabilityResponses, requiredField: "input", tokenFields: []string{"max_output_tokens"}}))
 	mux.HandleFunc("/v1/embeddings", b.inference(inferenceSpec{operation: CapabilityEmbeddings, requiredField: "input"}))
-	mux.HandleFunc("/v1/search", b.search)
 	return b.withLogging(b.withCORS(mux))
 }
 
@@ -301,14 +299,8 @@ func (b *Bridge) capabilities(w http.ResponseWriter, r *http.Request) {
 		}
 		data = append(data, item)
 	}
-	search := map[string]any{"enabled": b.searcher != nil}
-	if b.searcher != nil {
-		search["provider"] = b.searcher.cfg.Provider
-		search["max_results"] = b.searcher.cfg.MaxResults
-		search["max_read_pages"] = b.searcher.cfg.MaxReadPages
-	}
 	load := map[string]any{"active": len(b.semaphore), "max_concurrent": cap(b.semaphore), "queued": b.queued.Load(), "max_queued": b.cfg.MaxQueued}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data, "load": load, "search": search})
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data, "load": load})
 }
 
 // acquireSlot takes an upstream slot, waiting up to QUEUE_TIMEOUT in a bounded

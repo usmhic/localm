@@ -4,11 +4,10 @@
 
 LocalM is a stateless LLM gateway. It authenticates and constrains client
 requests, selects an explicitly configured OpenAI-compatible connection, and
-relays compatible responses. It can also answer web research requests from a
-self-hosted search engine (`/v1/search`), a retrieval primitive like
-embeddings. Model installation/loading, chats, tool execution, workflows, and
-agent state remain outside the process: LocalM returns sources, it never
-decides what to do with them.
+relays compatible responses. Model installation/loading, chats, tool execution,
+web search, workflows, and agent state remain outside the process: those belong
+to the clients (an agent orchestrator, for example), which use LocalM only to
+reach models.
 
 ## Request flow
 
@@ -97,25 +96,17 @@ must be global, and scale inference connections independently.
 - `capabilities.go`: capability vocabulary, presets, and model discovery cache.
 - `main.go`: HTTP surface, policy enforcement, queueing, routing, failover, and
   lifecycle.
-- `search.go`: the optional `/v1/search` primitive, SearXNG queries, result
-  merging, and public-address-only page reading.
 - `provider.go`: generic compatible transport, model parsing, streaming, and
   sanitized upstream errors.
 - `docs.go`: embedded OpenAPI and Swagger UI.
 
-## Web research
+## Serving a laptop
 
-`/v1/search` stays a retrieval primitive: queries in, sources out. Page reads
-are the only requests LocalM makes to addresses it did not configure, so they
-use a separate HTTP client that refuses non-public addresses when connecting
-(after DNS resolution), re-checks every redirect, ignores environment proxies,
-and bounds ports, size, time and content type. See [Web research](search.md).
-
-## Local stack
-
-`deploy/stack` composes Ollama, SearXNG and LocalM (plus an optional tunnel) on
-one machine, with LocalM as the only published port. It is a deployment
-recipe, not part of the binary. See [Local stack](local-stack.md).
+`docker-compose.yml` and `scripts/serve.sh` put LocalM in front of a natively
+running Ollama (which gets the GPU on every platform), with an optional
+Cloudflare tunnel; on Linux, `docker-compose.linux.yml` shares the host network
+so LocalM reaches Ollama on 127.0.0.1. It is a deployment recipe, not part of
+the binary. See [Serve from a laptop](laptop.md).
 
 Prefer a provider preset over a provider-specific adapter. Add an adapter only
 when a runtime cannot expose compatible models and inference endpoints.

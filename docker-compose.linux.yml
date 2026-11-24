@@ -1,0 +1,15 @@
+# Linux: Ollama listens on 127.0.0.1, which a container on Docker's bridge network can't reach.
+# scripts/serve.sh adds this file on Linux so LocalM (and the tunnel) share the host's network
+# instead, and LocalM still listens on this machine only.
+services:
+  bridge:
+    network_mode: host
+    ports: !reset []
+    extra_hosts: !reset []
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      LISTEN_ADDR: ${LOCALM_BIND_ADDRESS:-127.0.0.1}:${LOCALM_PORT:-8080}
+
+  tunnel:
+    network_mode: host
+    command: ${CLOUDFLARE_TUNNEL_COMMAND:-tunnel --no-autoupdate --url http://127.0.0.1:${LOCALM_PORT:-8080}}

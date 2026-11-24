@@ -181,7 +181,7 @@ func TestQueueWaitsForASlotThenRejectsWhenFull(t *testing.T) {
 	}
 }
 
-func TestCapabilitiesReportLoadAndSearch(t *testing.T) {
+func TestCapabilitiesReportLoad(t *testing.T) {
 	upstream := countingServer(http.StatusOK, `{"data":[{"id":"qwen3:8b"}]}`, new(atomic.Int32))
 	defer upstream.Close()
 	cfg := testConfig(upstream.URL)
@@ -192,13 +192,13 @@ func TestCapabilitiesReportLoadAndSearch(t *testing.T) {
 	newBridge(cfg, upstream.Client()).routes().ServeHTTP(response, req)
 	var body struct {
 		Load   map[string]float64 `json:"load"`
-		Search map[string]any     `json:"search"`
+		Search any                `json:"search"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Load["max_concurrent"] != 2 || body.Load["max_queued"] != 3 || body.Search["enabled"] != false {
-		t.Fatalf("unexpected load/search report: %+v %+v", body.Load, body.Search)
+	if body.Load["max_concurrent"] != 2 || body.Load["max_queued"] != 3 || body.Search != nil {
+		t.Fatalf("unexpected load report: %+v (search %v)", body.Load, body.Search)
 	}
 }
 

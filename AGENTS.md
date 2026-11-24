@@ -3,20 +3,20 @@
 ## Product
 
 localm is a small, secure OpenAI-compatible gateway for local LLM runtimes,
-maintained by usmhic. It is a gateway, not a model manager or agent runtime.
-Its optional web research (`/v1/search`) is a retrieval primitive: it returns
-sources and never acts on them.
+maintained by usmhic. It is a gateway, not a model manager, search engine, or agent runtime: it
+only puts authentication, limits, and routing in front of models. Orchestration,
+tools, and web research belong to the clients.
 
 ## Map
 
 - `main.go`: HTTP surface, auth, limits, queueing, routing, failover, and startup.
 - `config.go`: environment and named-connections configuration.
 - `capabilities.go`: capability vocabulary, discovery cache, and connection pauses.
-- `search.go`: `/v1/search`, SearXNG queries, and public-only page reading.
 - `provider.go`: provider presets and upstream URL normalization.
 - `docs.go`: embedded OpenAPI and Swagger assets.
-- `docs`: focused operator, provider, deployment, search, stack, and agent guides.
-- `deploy/stack`, `scripts/stack.sh`: the local stack (Ollama + SearXNG + LocalM + tunnel).
+- `docs`: focused operator, provider, deployment, laptop, and agent guides.
+- `docker-compose.yml` (+ `docker-compose.linux.yml`), `scripts/serve.sh`: serving a
+  machine's native Ollama through LocalM, with an optional Cloudflare tunnel.
 
 Read `docs/architecture.md` before expanding the API surface.
 
@@ -28,7 +28,7 @@ Read `docs/architecture.md` before expanding the API surface.
 - Static analysis: `go vet ./...`
 - Build: `go build ./...`
 - Compose: `docker compose --no-interpolate config --quiet` and
-  `docker compose -f deploy/stack/compose.yaml config --no-interpolate --quiet`
+  `docker compose -f docker-compose.yml -f docker-compose.linux.yml config --no-interpolate --quiet`
 - Container: `docker build -t localm:test .`
 
 ## Guardrails
@@ -41,8 +41,9 @@ Read `docs/architecture.md` before expanding the API surface.
 - Prefer standard-library solutions and provider presets over adapters.
 - Update embedded OpenAPI and docs with every public API/configuration change.
 - Keep defaults safe for a gateway exposed beyond localhost.
-- Never log search queries, result URLs, or page content. Page reads must stay
-  public-address-only, checked at dial time, with every redirect re-checked.
 - Fail over only before the first relayed byte, and never retry a request the
   upstream rejected (4xx other than 429).
 - Keep the project generic: no product-specific names, defaults, or behavior.
+- Keep the setup small: a working gateway needs only `API_KEYS` and
+  `ALLOWED_MODELS`; new settings get safe defaults and live in
+  `docs/configuration.md`, not in the short `.env.example`.

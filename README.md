@@ -2,8 +2,8 @@
 
 LocalM is a lightweight, open-source gateway that provides one dependable,
 secure, OpenAI-compatible API for local, self-hosted, and explicitly configured
-remote LLM providers, with optional web research from a self-hosted search
-engine.
+remote LLM providers. Run it next to Ollama on the machine with the GPU, and
+any OpenAI-compatible client, anywhere, can use those models through one key.
 
 [![CI](https://github.com/usmhic/localm/actions/workflows/ci.yml/badge.svg)](https://github.com/usmhic/localm/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -29,16 +29,14 @@ chat application, workflow builder, or agent runtime.
 - Failover to the next connection when one fails before answering, with a
   backing-off pause for failing connections, and a bounded queue when every
   slot is busy.
-- Optional web research, `POST /v1/search`: a self-hosted SearXNG searched,
-  results merged, and the top pages read as text, on public addresses only.
-- A one-command [local stack](docs/local-stack.md): Ollama, SearXNG and LocalM
-  on your machine, with an optional Cloudflare tunnel.
+- One command to [serve a laptop's models](docs/laptop.md): native Ollama for
+  the GPU, LocalM in front, and an optional Cloudflare tunnel.
 - Client API-key authentication, model allowlists, request/token limits,
   per-key and per-IP rate limits, and bounded concurrency.
 - A static, non-root production container with no application runtime
   dependencies.
 
-LocalM does not store prompts, responses, embeddings, search queries, pages, or credentials. It does
+LocalM does not store prompts, responses, embeddings, or credentials. It does
 not enable telemetry or make background network calls. Public health and API
 documentation routes do not expose connection details.
 
@@ -61,18 +59,18 @@ are rejected; LocalM never removes them silently. Successful compatible fields
 pass through, while upstream error bodies are replaced with sanitized
 OpenAI-style errors.
 
-## Quick start: the whole stack
+## Quick start: serve your laptop's models
 
-Models, embeddings and web research on your own machine, behind one key:
+Install [Ollama](https://ollama.com/download), pull a model, then:
 
 ```bash
-scripts/stack.sh up --size medium   # Ollama + SearXNG + LocalM, models pulled
-scripts/stack.sh check              # auth, chat, JSON, tools, embeddings, search
-scripts/stack.sh env                # the base URL, key and models for your client
+ollama pull qwen3:8b
+scripts/serve.sh up            # creates the key, starts LocalM on 127.0.0.1:8080
+scripts/serve.sh check         # auth, chat and tool calling
+scripts/serve.sh up --tunnel   # also an HTTPS address a server elsewhere can reach
 ```
 
-Add `--tunnel` for an HTTPS address reachable from anywhere. See
-[Local stack](docs/local-stack.md).
+It prints the base URL and key for your client. See [Serve from a laptop](docs/laptop.md).
 
 ## Quick start with Ollama
 
@@ -169,8 +167,7 @@ For Docker, mount the YAML file read-only as described in
 | `POST /v1/responses` | Bearer key | Responses API |
 | `POST /v1/embeddings` | Bearer key | Embeddings API |
 | `GET /v1/models` | Bearer key | Globally allowed models |
-| `GET /v1/capabilities` | Bearer key | Sanitized connection/model capability discovery, load, and search status |
-| `POST /v1/search` | Bearer key | Optional web research ([docs](docs/search.md)) |
+| `GET /v1/capabilities` | Bearer key | Sanitized connection/model capability discovery and load |
 | `GET /healthz` | Public | Process liveness only |
 | `GET /readyz` | Public | Aggregate readiness only |
 | `GET /docs/` | Public | Swagger UI |
@@ -194,7 +191,7 @@ go test -race ./...
 go vet ./...
 go build ./...
 docker compose --no-interpolate config --quiet
-docker compose -f deploy/stack/compose.yaml config --no-interpolate --quiet
+docker compose -f docker-compose.yml -f docker-compose.linux.yml config --no-interpolate --quiet
 docker build -t localm:test .
 ```
 
@@ -232,8 +229,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow,
 - [Configuration reference](docs/configuration.md)
 - [Provider setup](docs/providers.md)
 - [Deployment](docs/deployment.md)
-- [Local stack](docs/local-stack.md)
-- [Web research](docs/search.md)
+- [Serve from a laptop](docs/laptop.md)
 - [Agent and tool-calling guide](docs/agents.md)
 - [Engineering standards](STANDARDS.md)
 - [Package naming](PACKAGE_NAMING.md) - public module, executable, and image identifiers

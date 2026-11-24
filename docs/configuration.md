@@ -4,6 +4,13 @@ Values are read once at startup. Invalid connection files, URLs, trust policy,
 or missing required keys stop startup. Malformed optional numeric environment
 values retain their existing behavior and fall back to safe defaults.
 
+## The short version
+
+A working gateway needs two settings: `API_KEYS` and `ALLOWED_MODELS`. With
+Ollama on the same machine nothing else is required; `scripts/serve.sh` writes
+both, plus roomier limits for agents (see [Serve from a laptop](laptop.md)).
+Everything below is optional.
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -35,7 +42,6 @@ values retain their existing behavior and fall back to safe defaults.
 | `SERVER_IDLE_TIMEOUT` | `60s` | Keep-alive idle timeout |
 | `CORS_ENABLED` | `false` | Enable browser cross-origin access |
 | `CORS_ALLOWED_ORIGINS` | empty | Comma-separated exact origins, or `*` |
-| `SEARCH_BASE_URL` | empty | Enables `/v1/search` with this SearXNG instance; see [Web research](search.md) for the `SEARCH_*` settings |
 
 `OLLAMA_BASE_URL` remains a compatibility alias when `LLM_PROVIDER=ollama` and
 `UPSTREAM_BASE_URL` is absent. `MAX_CONCURRENT_OLLAMA` remains a fallback for
@@ -107,3 +113,12 @@ the environment variable referenced by `api_key_env` and restarting LocalM.
 Do not commit `.env`; it is ignored by Git and the Docker build context.
 The tracked `.env.example` contains empty values for every application and
 Compose setting. Empty optional values retain the documented defaults.
+
+## Docker Compose and the tunnel
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `LOCALM_IMAGE_TAG` | `latest` | Image tag Compose pulls |
+| `LOCALM_BIND_ADDRESS` | `127.0.0.1` | Host address Compose publishes LocalM on |
+| `LOCALM_PORT` | `8080` | Host port Compose publishes LocalM on |
+| `CLOUDFLARE_TUNNEL_TOKEN` | empty | A named Cloudflare tunnel (fixed hostname); empty uses a quick tunnel on a random address |
